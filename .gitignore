@@ -1,0 +1,10 @@
+**/go.sum
+
+.DS_Store
+**/env.rc
+**/*.pem
+**/*key
+
+**/*.zip
+
+photo-wasabi
