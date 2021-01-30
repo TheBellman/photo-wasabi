@@ -1,0 +1,20 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      golang: latest
+  pre_build:
+    commands:
+      - echo Build started
+      - go test
+  build:
+    commands:
+      - go build
+  post_build:
+    commands:
+      - echo Build completed
+artifacts:
+  files:
+    - photo-wasabi
+  name: photo-wasabi-$(date +%Y%m%d.%H%M%s).zip
