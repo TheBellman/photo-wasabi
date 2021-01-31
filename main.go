@@ -45,7 +45,7 @@ type s3Service interface {
 var params *runtimeParameters
 
 const (
-	DefaultSrcPrefix = "import/"
+	DefaultSrcPrefix = "photos/"
 	DefaultRegion    = "eu-west-2"
 	WasabiSecret     = "wasabi-access"
 	JPEG             = "image/jpeg"
