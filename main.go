@@ -235,6 +235,6 @@ func main() {
 	}
 	params.WasabiService = s3.New(sess)
 
-	log.Println("Registering handler...")
+	log.Println("Registering handler for photo-wasabi...")
 	lambda.Start(HandleLambdaEvent)
 }
