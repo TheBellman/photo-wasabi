@@ -19,6 +19,7 @@ import (
 	"strings"
 )
 
+// runtimeParameters contains various bits needed during execution
 type runtimeParameters struct {
 	WasabiKey     string
 	WasabiSecret  string
@@ -31,7 +32,7 @@ type runtimeParameters struct {
 	WasabiService *s3.S3
 }
 
-// secretService is used so that we can inject a mock service for testing
+// secretService helps with mocking access to SecretsManager
 type secretService interface {
 	GetSecretValue(input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error)
 }
@@ -39,10 +40,6 @@ type secretService interface {
 // s3Service helps with mocking access to S3
 type s3Service interface {
 	GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error)
-	//CopyObject(input *s3.CopyObjectInput) (*s3.CopyObjectOutput, error)
-	//WaitUntilObjectExists(input *s3.HeadObjectInput) error
-	//DeleteObject(input *s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error)
-	//PutObject(input *s3.PutObjectInput) (*s3.PutObjectOutput, error)
 }
 
 var params *runtimeParameters
@@ -61,23 +58,6 @@ func init() {
 		WasabiBucket: os.Getenv("WASABI_BUCKET"),
 		WasabiRegion: os.Getenv("WASABI_REGION"),
 	}
-
-	sess, err := makeAWSSession(params.Region)
-	if err != nil {
-		log.Fatal("Error starting AWS session", err)
-	}
-	params.S3service = s3.New(sess)
-
-	params.WasabiKey, params.WasabiSecret, err = getWasabiSecret(secretsmanager.New(sess))
-	if err != nil {
-		log.Fatal("Error fetching Wasabi key", err)
-	}
-
-	sess, err = makeWasabiSession(params.WasabiRegion, params.WasabiKey, params.WasabiSecret)
-	if err != nil {
-		log.Fatal("Error starting Wasabi session", err)
-	}
-	params.WasabiService = s3.New(sess)
 }
 
 // makeWasabiSession sets up a session to use with Wasabi.
@@ -235,6 +215,26 @@ func HandleLambdaEvent(request events.S3Event) (int, error) {
 
 // main function invoked when the lambda is launched
 func main() {
+	// create a service to read from S3
+	sess, err := makeAWSSession(params.Region)
+	if err != nil {
+		log.Fatal("Error starting AWS session", err)
+	}
+	params.S3service = s3.New(sess)
+
+	// get the wasabi secrets from SecretsManager
+	params.WasabiKey, params.WasabiSecret, err = getWasabiSecret(secretsmanager.New(sess))
+	if err != nil {
+		log.Fatal("Error fetching Wasabi key", err)
+	}
+
+	// and use the secrets to set up a service to write to Wasabi
+	sess, err = makeWasabiSession(params.WasabiRegion, params.WasabiKey, params.WasabiSecret)
+	if err != nil {
+		log.Fatal("Error starting Wasabi session", err)
+	}
+	params.WasabiService = s3.New(sess)
+
 	log.Println("Registering handler...")
 	lambda.Start(HandleLambdaEvent)
 }
