@@ -127,3 +127,61 @@ func Test_validateRegion(t *testing.T) {
 		})
 	}
 }
+
+func Test_parseMessage(t *testing.T) {
+
+	messageBody:=`{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "eu-west-2",
+      "eventTime": "2021-01-31T20:04:15.053Z",
+      "eventName": "ObjectCreated:Copy",
+      "userIdentity": {
+        "principalId": "AWS:AROA46CDIYCJQTXNTWQ36:photo-lambda"
+      },
+      "requestParameters": {
+        "sourceIPAddress": "35.177.37.71"
+      },
+      "responseElements": {
+        "x-amz-request-id": "ADD9D43C5A604209",
+        "x-amz-id-2": "gJp13URoEHybxQDe1eFpdX+IfB/LmUNPRsZdg7djTq/L1AtEHR3o0Ye5jvExrco94VGDLKAwfgjlrHgAApz5m3WVPeaDdT5RNP1Gv7wwiEQ="
+      },
+      "s3": {
+        "s3SchemaVersion": "1.0",
+        "configurationId": "tf-s3-topic-20210131162404270500000001",
+        "bucket": {
+          "name": "rahookphotos20200913140553484200000001",
+          "ownerIdentity": {
+            "principalId": "AM5JIJPPSMRC3"
+          },
+          "arn": "arn:aws:s3:::rahookphotos20200913140553484200000001"
+        },
+        "object": {
+          "key": "photos/2020/03/20/IMG_0883.jpeg",
+          "size": 10551027,
+          "eTag": "f95f692e6caa5bb2fd9cfc66156d290c",
+          "sequencer": "0060170D40D12F82DC"
+        }
+      }
+    }
+  ]
+}
+`
+
+	message, err := parseMessage(messageBody)
+	if err != nil {
+		t.Errorf("parseMessage() error = %v", err)
+	}
+
+	for _, msg := range message.Records {
+		if msg.S3.Bucket.Arn != "arn:aws:s3:::rahookphotos20200913140553484200000001" {
+			t.Errorf("parseMessage() unexpected ARN: %s", msg.S3.Bucket.Arn)
+		}
+		if msg.S3.Object.Key != "photos/2020/03/20/IMG_0883.jpeg" {
+			t.Errorf("parseMessage() unexpected key: %s", msg.S3.Object.Key)
+		}
+	}
+
+}

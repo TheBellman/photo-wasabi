@@ -37,6 +37,11 @@ type secretService interface {
 	GetSecretValue(input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error)
 }
 
+// snsMessage encapsulates the message we get from SNS
+type snsMessage struct {
+	Records []events.S3EventRecord `json:"Records"`
+}
+
 // s3Service helps with mocking access to S3
 type s3Service interface {
 	GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error)
@@ -166,47 +171,67 @@ func saveToWasabi(params *runtimeParameters, image *[]byte, key string) error {
 	return nil
 }
 
+// parseMessage tries to forge the JSON message body from SNS
+func parseMessage(messageBody string) (*snsMessage, error) {
+	var message snsMessage
+
+	err := json.Unmarshal([]byte(messageBody), &message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse the message body: %q = %v", messageBody, err)
+	}
+	return &message, nil
+}
+
 // HandleLambdaEvent takes care of processing the incoming S3 event. Only "ObjectCreated:*" events are processed, and only
 // for where the object key starts with the nominated prefix. The count of processed objects is returned
-func HandleLambdaEvent(request events.S3Event) (int, error) {
+func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 	cnt := 0
-	for _, event := range request.Records {
-		log.Printf("Received request for : object %s/%s", event.S3.Bucket.Name, event.S3.Object.Key)
-		// only process events where the object key as the expected prefix and the event is an object creation
-		if strings.HasPrefix(event.S3.Object.Key, params.SourcePrefix) && strings.HasPrefix(event.EventName, "ObjectCreated:") {
-			decodedKey, err := url.QueryUnescape(event.S3.Object.Key)
-			if err != nil {
-				log.Printf("Failed to decode the key: '%s'", event.S3.Object.Key)
-				continue
-			}
+	// each SNS event probably only has a single record in it, but you never know
+	for _, record := range snsEvent.Records {
+		message, err := parseMessage(record.SNS.Message)
+		if err != nil {
+			log.Printf("failed to parse the SNS message at all: %v", err)
+			continue
+		}
 
-			// this should be a cannot-happen case
-			if event.AWSRegion != params.Region {
-				log.Printf("Event is not from the same region as the lambda: got %q, wanted %q", event.AWSRegion, params.Region)
-				continue
-			}
+		for _, event := range message.Records {
+			log.Printf("Received request for : object %s/%s", event.S3.Bucket.Name, event.S3.Object.Key)
+			// only process events where the object key as the expected prefix and the event is an object creation
+			if strings.HasPrefix(event.S3.Object.Key, params.SourcePrefix) && strings.HasPrefix(event.EventName, "ObjectCreated:") {
+				decodedKey, err := url.QueryUnescape(event.S3.Object.Key)
+				if err != nil {
+					log.Printf("Failed to decode the key: '%s'", event.S3.Object.Key)
+					continue
+				}
 
-			// fetch the object and hand back an io.reader
-			imgReader, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
-			if err != nil {
-				log.Printf("Failed to get a reader to read from %s/%s: %v", event.S3.Bucket.Name, decodedKey, err)
-				continue
-			}
+				// this should be a cannot-happen case
+				if event.AWSRegion != params.Region {
+					log.Printf("Event is not from the same region as the lambda: got %q, wanted %q", event.AWSRegion, params.Region)
+					continue
+				}
 
-			// extract the image data
-			imageBytes, err := getImage(imgReader)
-			if err != nil {
-				log.Printf("Failed to read image bytes: %v", err)
-				continue
-			}
+				// fetch the object and hand back an io.reader
+				imgReader, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
+				if err != nil {
+					log.Printf("Failed to get a reader to read from %s/%s: %v", event.S3.Bucket.Name, decodedKey, err)
+					continue
+				}
 
-			if err = saveToWasabi(params, imageBytes, decodedKey); err != nil {
-				log.Printf("failed to copy to wasabi: %v", err)
-				continue
-			}
+				// extract the image data
+				imageBytes, err := getImage(imgReader)
+				if err != nil {
+					log.Printf("Failed to read image bytes: %v", err)
+					continue
+				}
 
-			log.Printf("Processed request for : object %s/%s", event.S3.Bucket.Name, decodedKey)
-			cnt++
+				if err = saveToWasabi(params, imageBytes, decodedKey); err != nil {
+					log.Printf("failed to copy to wasabi: %v", err)
+					continue
+				}
+
+				log.Printf("Processed request for : object %s/%s", event.S3.Bucket.Name, decodedKey)
+				cnt++
+			}
 		}
 	}
 
