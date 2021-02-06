@@ -240,6 +240,7 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 
 // main function invoked when the lambda is launched
 func main() {
+	log.Println("photo-wasabi main() invoked")
 	// create a service to read from S3
 	sess, err := makeAWSSession(params.Region)
 	if err != nil {
