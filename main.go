@@ -57,12 +57,14 @@ const (
 )
 
 func init() {
+	log.Print("init() started")
 	params = &runtimeParameters{
 		SourcePrefix: validatePrefix(os.Getenv("SOURCE_PREFIX")),
 		Region:       validateRegion(os.Getenv("AWS_REGION")),
 		WasabiBucket: os.Getenv("WASABI_BUCKET"),
 		WasabiRegion: os.Getenv("WASABI_REGION"),
 	}
+	log.Print("init() finished")
 }
 
 // makeWasabiSession sets up a session to use with Wasabi.
