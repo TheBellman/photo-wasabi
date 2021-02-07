@@ -48,6 +48,7 @@ type s3Service interface {
 }
 
 var params *runtimeParameters
+var buildStamp string
 
 const (
 	DefaultSrcPrefix = "photos/"
@@ -57,14 +58,14 @@ const (
 )
 
 func init() {
-	log.Print("init() started")
+	buildStamp = os.Getenv("BUILD_STAMP")
+
 	params = &runtimeParameters{
 		SourcePrefix: validatePrefix(os.Getenv("SOURCE_PREFIX")),
 		Region:       validateRegion(os.Getenv("AWS_REGION")),
 		WasabiBucket: os.Getenv("WASABI_BUCKET"),
 		WasabiRegion: os.Getenv("WASABI_REGION"),
 	}
-	log.Print("init() finished")
 }
 
 // makeWasabiSession sets up a session to use with Wasabi.
@@ -192,46 +193,46 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 	for _, record := range snsEvent.Records {
 		message, err := parseMessage(record.SNS.Message)
 		if err != nil {
-			log.Printf("failed to parse the SNS message at all: %v", err)
+			log.Printf("[%s] failed to parse the SNS message at all: %v", buildStamp, err)
 			continue
 		}
 
 		for _, event := range message.Records {
-			log.Printf("Received request for : object %s/%s", event.S3.Bucket.Name, event.S3.Object.Key)
+			log.Printf("[%s] Received request for : object %s/%s", buildStamp, event.S3.Bucket.Name, event.S3.Object.Key)
 			// only process events where the object key as the expected prefix and the event is an object creation
 			if strings.HasPrefix(event.S3.Object.Key, params.SourcePrefix) && strings.HasPrefix(event.EventName, "ObjectCreated:") {
 				decodedKey, err := url.QueryUnescape(event.S3.Object.Key)
 				if err != nil {
-					log.Printf("Failed to decode the key: '%s'", event.S3.Object.Key)
+					log.Printf("[%s] Failed to decode the key: '%s'", buildStamp, event.S3.Object.Key)
 					continue
 				}
 
 				// this should be a cannot-happen case
 				if event.AWSRegion != params.Region {
-					log.Printf("Event is not from the same region as the lambda: got %q, wanted %q", event.AWSRegion, params.Region)
+					log.Printf("[%s] Event is not from the same region as the lambda: got %q, wanted %q", buildStamp, event.AWSRegion, params.Region)
 					continue
 				}
 
 				// fetch the object and hand back an io.reader
 				imgReader, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
 				if err != nil {
-					log.Printf("Failed to get a reader to read from %s/%s: %v", event.S3.Bucket.Name, decodedKey, err)
+					log.Printf("[%s] Failed to get a reader to read from %s/%s: %v", buildStamp, event.S3.Bucket.Name, decodedKey, err)
 					continue
 				}
 
 				// extract the image data
 				imageBytes, err := getImage(imgReader)
 				if err != nil {
-					log.Printf("Failed to read image bytes: %v", err)
+					log.Printf("[%s] Failed to read image bytes: %v", buildStamp, err)
 					continue
 				}
 
 				if err = saveToWasabi(params, imageBytes, decodedKey); err != nil {
-					log.Printf("failed to copy to wasabi: %v", err)
+					log.Printf("[%s] failed to copy to wasabi: %v", buildStamp, err)
 					continue
 				}
 
-				log.Printf("Processed request for : object %s/%s", event.S3.Bucket.Name, decodedKey)
+				log.Printf("[%s] Processed request for : object %s/%s", buildStamp, event.S3.Bucket.Name, decodedKey)
 				cnt++
 			}
 		}
@@ -242,7 +243,6 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 
 // main function invoked when the lambda is launched
 func main() {
-	log.Println("photo-wasabi main() invoked")
 	// create a service to read from S3
 	sess, err := makeAWSSession(params.Region)
 	if err != nil {
@@ -263,6 +263,6 @@ func main() {
 	}
 	params.WasabiService = s3.New(sess)
 
-	log.Println("Registering handler for photo-wasabi...")
+	log.Printf("[%s] Registering handler for photo-wasabi...", buildStamp)
 	lambda.Start(HandleLambdaEvent)
 }
