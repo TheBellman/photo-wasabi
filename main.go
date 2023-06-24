@@ -127,21 +127,23 @@ func validatePrefix(photoPrefix string) string {
 }
 
 // getImageReader tries to get an io.Reader exposing the body of an image given the bucket and key. It will fail
-// if the provided object is not a JPEG
-func getImageReader(service s3Service, bucket string, key string) (io.Reader, error) {
+// if the provided object is not a supported file type. It returns the reader along with the content type
+func getImageReader(service s3Service, bucket string, key string) (io.Reader, string, error) {
 	result, err := service.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error fetching from s3: %v", err)
+		return nil, "", fmt.Errorf("error fetching from s3: %v", err)
 	}
 
-	if *result.ContentType != JPEG {
-		return nil, fmt.Errorf("only JPEG supported, fetched file was reported as %s", *result.ContentType)
+	if strings.HasSuffix(strings.ToLower(key), ".cr3") || *result.ContentType == JPEG {
+		return result.Body, *result.ContentType, nil
 	}
 
-	return result.Body, nil
+	return nil, "", fmt.Errorf("only JPEG and CR3 supported, fetched file %s was reported as %s",
+		key,
+		*result.ContentType)
 }
 
 // getImage retrieves the byte contents of a specified reader
@@ -155,7 +157,7 @@ func getImage(r io.Reader) (*[]byte, error) {
 
 // saveToWasabi uses the current configuration to write the supplied image bytes to the target key
 // TODO: this needs a test
-func saveToWasabi(params *runtimeParameters, image *[]byte, key string) error {
+func saveToWasabi(params *runtimeParameters, image *[]byte, key string, contentType string) error {
 	if params.WasabiService == nil {
 		return fmt.Errorf("no service has been provided to write to wasabi")
 	}
@@ -163,7 +165,7 @@ func saveToWasabi(params *runtimeParameters, image *[]byte, key string) error {
 	result, err := params.WasabiService.PutObject(&s3.PutObjectInput{
 		Body:        bytes.NewReader(*image),
 		Bucket:      aws.String(params.WasabiBucket),
-		ContentType: aws.String(JPEG),
+		ContentType: aws.String(contentType),
 		Key:         aws.String(key),
 	})
 	if err != nil {
@@ -214,7 +216,7 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 				}
 
 				// fetch the object and hand back an io.reader
-				imgReader, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
+				imgReader, contentType, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
 				if err != nil {
 					log.Printf("[%s] Failed to get a reader to read from %s/%s: %v", buildStamp, event.S3.Bucket.Name, decodedKey, err)
 					continue
@@ -227,7 +229,7 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 					continue
 				}
 
-				if err = saveToWasabi(params, imageBytes, decodedKey); err != nil {
+				if err = saveToWasabi(params, imageBytes, decodedKey, contentType); err != nil {
 					log.Printf("[%s] failed to copy to wasabi: %v", buildStamp, err)
 					continue
 				}

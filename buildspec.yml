@@ -3,13 +3,17 @@ version: 0.2
 phases:
   install:
     runtime-versions:
-      golang: latest
+      golang: 1.18
   pre_build:
     commands:
       - echo Build started
+      - go mod download github.com/aws/aws-lambda-go
+      - go get github.com/TheBellman/photo-wasabi
       - go test
   build:
     commands:
+      - go mod download github.com/aws/aws-lambda-go
+      - go get github.com/TheBellman/photo-wasabi
       - go build
   post_build:
     commands:

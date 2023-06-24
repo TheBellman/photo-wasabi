@@ -15,6 +15,7 @@ type mockS3 struct{}
 
 var jpegMime = "image/jpeg"
 var txtMime = "text/plain"
+var octetMime = "binary/octet-stream"
 
 func testFileReader(name string) io.ReadCloser {
 	f, err := os.Open(name)
@@ -25,7 +26,7 @@ func testFileReader(name string) io.ReadCloser {
 }
 
 func (f *mockSecretsClient) GetSecretValue(input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error) {
-	secret :=  "{\"ACCESS_KEY_ID\": \"key\", \"SECRET_ACCESS_KEY\": \"secret\"}"
+	secret := "{\"ACCESS_KEY_ID\": \"key\", \"SECRET_ACCESS_KEY\": \"secret\"}"
 	return &secretsmanager.GetSecretValueOutput{
 		SecretString: &secret,
 	}, nil
@@ -46,19 +47,31 @@ func (f *mockS3) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error
 		}, nil
 	}
 
+	if *input.Key == "key/test.CR3" {
+		return &s3.GetObjectOutput{
+			ContentType: &octetMime,
+			Body:        testFileReader("./test.CR3"),
+		}, nil
+	}
+
 	return nil, errors.New("unexpected test key provided")
 }
 
 func Test_getImageReader(t *testing.T) {
 	mock := mockS3{}
-	_, err := getImageReader(&mock, "bucket", "key/good.jpeg")
+	_, _, err := getImageReader(&mock, "bucket", "key/good.jpeg")
 	if err != nil {
 		t.Errorf("Received an unexpected error: %v", err)
 	}
 
-	_, err = getImageReader(&mock, "bucket", "key/bad.jpeg")
+	_, _, err = getImageReader(&mock, "bucket", "key/bad.jpeg")
 	if err == nil {
 		t.Errorf("Did not get an error when expected")
+	}
+
+	_, _, err = getImageReader(&mock, "bucket", "key/test.CR3")
+	if err != nil {
+		t.Errorf("Received an unexpected error: %v", err)
 	}
 }
 
@@ -130,7 +143,7 @@ func Test_validateRegion(t *testing.T) {
 
 func Test_parseMessage(t *testing.T) {
 
-	messageBody:=`{
+	messageBody := `{
   "Records": [
     {
       "eventVersion": "2.1",
