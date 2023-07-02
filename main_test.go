@@ -54,6 +54,13 @@ func (f *mockS3) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error
 		}, nil
 	}
 
+	if *input.Key == "key/test.HEIC" {
+		return &s3.GetObjectOutput{
+			ContentType: &octetMime,
+			Body:        testFileReader("./test.HEIC"),
+		}, nil
+	}
+
 	return nil, errors.New("unexpected test key provided")
 }
 
@@ -76,12 +83,15 @@ func Test_getImageReader(t *testing.T) {
 }
 
 func Test_getImage(t *testing.T) {
-	data, err := getImage(testFileReader("./test.jpeg"))
-	if err != nil {
-		t.Errorf("unexpected error loading file: %v", err)
-	}
-	if len(*data) == 0 {
-		t.Errorf("empty byte slice returned!")
+	keys := []string{"./test.jpeg", "./test.CR3", "./test.HEIC"}
+	for _, key := range keys {
+		data, err := getImage(testFileReader(key))
+		if err != nil {
+			t.Errorf("unexpected error loading file: %v", err)
+		}
+		if len(*data) == 0 {
+			t.Errorf("empty byte slice returned!")
+		}
 	}
 }
 

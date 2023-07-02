@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -55,6 +54,7 @@ const (
 	DefaultRegion    = "eu-west-2"
 	WasabiSecret     = "wasabi-access"
 	JPEG             = "image/jpeg"
+	HEIC             = "image/heic"
 )
 
 func init() {
@@ -137,18 +137,21 @@ func getImageReader(service s3Service, bucket string, key string) (io.Reader, st
 		return nil, "", fmt.Errorf("error fetching from s3: %v", err)
 	}
 
-	if strings.HasSuffix(strings.ToLower(key), ".cr3") || *result.ContentType == JPEG {
+	if strings.HasSuffix(strings.ToLower(key), ".cr3") ||
+		strings.HasSuffix(strings.ToLower(key), ".heic") ||
+		*result.ContentType == HEIC ||
+		*result.ContentType == JPEG {
 		return result.Body, *result.ContentType, nil
 	}
 
-	return nil, "", fmt.Errorf("only JPEG and CR3 supported, fetched file %s was reported as %s",
+	return nil, "", fmt.Errorf("only JPEG, CR3 and HEIC supported, fetched file %s was reported as %s",
 		key,
 		*result.ContentType)
 }
 
 // getImage retrieves the byte contents of a specified reader
 func getImage(r io.Reader) (*[]byte, error) {
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return &[]byte{}, err
 	}
