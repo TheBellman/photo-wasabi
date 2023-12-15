@@ -9,16 +9,16 @@ phases:
       - echo Build started
       - go mod download github.com/aws/aws-lambda-go
       - go get github.com/TheBellman/photo-wasabi
-      - go test
+      - GOARCH=amd64 GOOS=linux go test
   build:
     commands:
       - go mod download github.com/aws/aws-lambda-go
       - go get github.com/TheBellman/photo-wasabi
-      - go build
+      - GOARCH=amd64 GOOS=linux go build -o bootstrap main.go
   post_build:
     commands:
       - echo Build completed
 artifacts:
   files:
-    - photo-wasabi
+    - bootstrap
   name: photo-wasabi-$(date +%Y%m%d.%H%M%s).zip
