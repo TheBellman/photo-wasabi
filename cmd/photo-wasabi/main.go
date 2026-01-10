@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -90,7 +88,9 @@ func (a *App) HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (
 	for _, record := range snsEvent.Records {
 		var s3Event events.S3Event
 		if err := json.Unmarshal([]byte(record.SNS.Message), &s3Event); err != nil {
-			log.Printf("[%s] failed to parse SNS message: %v", a.BuildStamp, err)
+			slog.Error("failed to parse SNS message",
+				"build_stamp", a.BuildStamp,
+				"error", err)
 			continue
 		}
 
@@ -101,7 +101,11 @@ func (a *App) HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (
 
 			key, _ := url.QueryUnescape(event.S3.Object.Key)
 			if err := a.processObject(ctx, event.S3.Bucket.Name, key); err != nil {
-				log.Printf("[%s] error processing %s: %v", a.BuildStamp, key, err)
+				slog.Error("error processing object",
+					"build_stamp", a.BuildStamp,
+					"bucket", event.S3.Bucket.Name,
+					"key", key,
+					"error", err)
 				continue
 			}
 			processedCount++
@@ -121,7 +125,7 @@ func (a *App) processObject(ctx context.Context, bucket, key string) error {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get object from S3: %w", err)
 	}
 	defer output.Body.Close()
 
@@ -130,18 +134,26 @@ func (a *App) processObject(ctx context.Context, bucket, key string) error {
 		return fmt.Errorf("unsupported file type: %s (%s)", key, contentType)
 	}
 
-	data, err := io.ReadAll(output.Body)
-	if err != nil {
-		return err
-	}
-
+	// Stream the data directly to Wasabi instead of ReadAll
 	_, err = a.Wasabi.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(a.Config.WasabiBucket),
 		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
+		Body:        output.Body, // Pass the reader directly
 		ContentType: aws.String(contentType),
+		// ContentLength is recommended when streaming
+		ContentLength: aws.Int64(aws.ToInt64(output.ContentLength)),
 	})
-	return err
+
+	if err != nil {
+		return fmt.Errorf("failed to put object to Wasabi: %w", err)
+	}
+
+	slog.Info("successfully mirrored object",
+		"key", key,
+		"size", aws.ToInt64(output.ContentLength),
+		"content_type", contentType)
+
+	return nil
 }
 
 func (a *App) getWasabiSecret(ctx context.Context, client *secretsmanager.Client) (string, string, error) {
@@ -188,12 +200,16 @@ func validatePrefix(p string) string {
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	ctx := context.Background()
 	app, err := NewApp(ctx)
 	if err != nil {
-		log.Fatalf("Initialization failed: %v", err)
+		slog.Error("Initialization failed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Printf("[%s] Starting photo-wasabi handler...", app.BuildStamp)
+	slog.Info("Starting photo-wasabi handler", "build_stamp", app.BuildStamp)
 	lambda.Start(app.HandleLambdaEvent)
 }
