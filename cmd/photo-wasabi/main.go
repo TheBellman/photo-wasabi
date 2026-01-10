@@ -44,7 +44,9 @@ type RuntimeConfig struct {
 	Region       string
 }
 
-// NewApp initializes the application dependencies
+// NewApp initializes the application dependencies including S3 and Wasabi clients.
+// It returns an error if the AWS SDK configuration cannot be loaded or if
+// Wasabi credentials cannot be retrieved.
 func NewApp(ctx context.Context) (*App, error) {
 	region := getEnv("AWS_REGION", DefaultRegion)
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -86,6 +88,11 @@ func NewApp(ctx context.Context) (*App, error) {
 	return app, nil
 }
 
+// HandleLambdaEvent processes incoming SNS notifications and mirrors the
+// referenced S3 objects to Wasabi storage.
+//
+// It returns the total count of processed objects and an error if the
+// SNS message format is invalid.
 func (a *App) HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (int, error) {
 	processedCount := 0
 	for _, record := range snsEvent.Records {
@@ -122,6 +129,8 @@ func (a *App) shouldProcess(event events.S3EventRecord) bool {
 		strings.HasPrefix(event.EventName, "ObjectCreated:")
 }
 
+// processObject retrieves an object from the source S3 bucket and uploads it
+// to the target Wasabi bucket using the same key.
 func (a *App) processObject(ctx context.Context, bucket, key string) error {
 	// If the Lambda context is cancelled (timeout), GetObject will return ctx.Err()
 	output, err := a.S3.GetObject(ctx, &s3.GetObjectInput{
@@ -161,6 +170,9 @@ func (a *App) processObject(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
+// getWasabiSecret fetches the access/secret key pair used to authenticate to Wasabi
+//
+// It returns the access key, secret key and any errors.
 func (a *App) getWasabiSecret(ctx context.Context, client *secretsmanager.Client) (string, string, error) {
 	out, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
 		SecretId: aws.String(WasabiSecretName),
@@ -179,6 +191,9 @@ func (a *App) getWasabiSecret(ctx context.Context, client *secretsmanager.Client
 	return creds.AccessKey, creds.SecretKey, nil
 }
 
+// isSupported checks if the S3 key and object content type is supported for the application.
+//
+// It returns true if the filename and content type look ok.
 func isSupported(key, contentType string) bool {
 	lowerKey := strings.ToLower(key)
 	return strings.HasSuffix(lowerKey, ".cr3") ||
@@ -187,6 +202,10 @@ func isSupported(key, contentType string) bool {
 		contentType == MimeJPEG
 }
 
+// getEnv fetches an environmental variable from the lambda environment. If not found
+// it falls back on the provided fallback value.
+//
+// The variable value or the fallback string are returned.
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -194,6 +213,11 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// validatePrefix ensures that a valid prefix is available. If the supplied string to check is blank
+// then the default source prefix is returned. If not blank, and it does not have a trailing /,
+// then a trailing / is added.
+//
+// This returns a string which is an acceptable source prefix.
 func validatePrefix(p string) string {
 	if p == "" {
 		return DefaultSrcPrefix
@@ -204,6 +228,7 @@ func validatePrefix(p string) string {
 	return p
 }
 
+// main initializes the application, sets up logging, and starts the Lambda function handler.
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
