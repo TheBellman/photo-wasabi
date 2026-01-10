@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"io"
 	"log"
 	"os"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 type mockSecretsClient struct{}
@@ -18,46 +20,51 @@ var txtMime = "text/plain"
 var octetMime = "binary/octet-stream"
 
 func testFileReader(name string) io.ReadCloser {
-	f, err := os.Open(name)
+	// Try looking in the project root relative to the test file
+	f, err := os.Open("../../" + name)
 	if err != nil {
-		log.Fatalf("Failed to open %s", name)
+		// Fallback for different test execution contexts
+		f, err = os.Open(name)
+		if err != nil {
+			log.Fatalf("Failed to open %s in root or current dir: %v", name, err)
+		}
 	}
 	return f
 }
 
-func (f *mockSecretsClient) GetSecretValue(input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error) {
+func (f *mockSecretsClient) GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	secret := "{\"ACCESS_KEY_ID\": \"key\", \"SECRET_ACCESS_KEY\": \"secret\"}"
 	return &secretsmanager.GetSecretValueOutput{
 		SecretString: &secret,
 	}, nil
 }
 
-func (f *mockS3) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
-	if *input.Key == "key/good.jpeg" {
+func (f *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	if *params.Key == "key/good.jpeg" {
 		return &s3.GetObjectOutput{
 			ContentType: &jpegMime,
-			Body:        testFileReader("./test.jpeg"),
+			Body:        testFileReader("../../testdata/test.jpeg"),
 		}, nil
 	}
 
-	if *input.Key == "key/bad.jpeg" {
+	if *params.Key == "key/bad.jpeg" {
 		return &s3.GetObjectOutput{
 			ContentType: &txtMime,
-			Body:        testFileReader("./test.jpeg"),
+			Body:        testFileReader("../../testdata/test.jpeg"),
 		}, nil
 	}
 
-	if *input.Key == "key/test.CR3" {
+	if *params.Key == "key/test.CR3" {
 		return &s3.GetObjectOutput{
 			ContentType: &octetMime,
-			Body:        testFileReader("./test.CR3"),
+			Body:        testFileReader("../../testdata/test.CR3"),
 		}, nil
 	}
 
-	if *input.Key == "key/test.HEIC" {
+	if *params.Key == "key/test.HEIC" {
 		return &s3.GetObjectOutput{
 			ContentType: &octetMime,
-			Body:        testFileReader("./test.HEIC"),
+			Body:        testFileReader("../../testdata/test.HEIC"),
 		}, nil
 	}
 
@@ -66,24 +73,24 @@ func (f *mockS3) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error
 
 func Test_getImageReader(t *testing.T) {
 	mock := mockS3{}
-	_, _, err := getImageReader(&mock, "bucket", "key/good.jpeg")
+	_, _, err := getImageReader(context.TODO(), &mock, "bucket", "key/good.jpeg")
 	if err != nil {
 		t.Errorf("Received an unexpected error: %v", err)
 	}
 
-	_, _, err = getImageReader(&mock, "bucket", "key/bad.jpeg")
+	_, _, err = getImageReader(context.TODO(), &mock, "bucket", "key/bad.jpeg")
 	if err == nil {
 		t.Errorf("Did not get an error when expected")
 	}
 
-	_, _, err = getImageReader(&mock, "bucket", "key/test.CR3")
+	_, _, err = getImageReader(context.TODO(), &mock, "bucket", "key/test.CR3")
 	if err != nil {
 		t.Errorf("Received an unexpected error: %v", err)
 	}
 }
 
 func Test_getImage(t *testing.T) {
-	keys := []string{"./test.jpeg", "./test.CR3", "./test.HEIC"}
+	keys := []string{"../../testdata/test.jpeg", "../../testdata/test.CR3", "../../testdata/test.HEIC"}
 	for _, key := range keys {
 		data, err := getImage(testFileReader(key))
 		if err != nil {
@@ -97,7 +104,7 @@ func Test_getImage(t *testing.T) {
 
 func Test_getWasabiSecret(t *testing.T) {
 	mock := mockSecretsClient{}
-	key, secret, err := getWasabiSecret(&mock)
+	key, secret, err := getWasabiSecret(context.TODO(), &mock)
 	if err != nil {
 		t.Errorf("getWasabiSecret() : %v", err)
 	}

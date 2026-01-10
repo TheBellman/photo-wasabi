@@ -2,20 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"io"
 	"log"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 // runtimeParameters contains various bits needed during execution
@@ -27,13 +29,13 @@ type runtimeParameters struct {
 	Region        string
 	SourceBucket  string
 	SourcePrefix  string
-	S3service     *s3.S3
-	WasabiService *s3.S3
+	S3service     *s3.Client
+	WasabiService *s3.Client
 }
 
 // secretService helps with mocking access to SecretsManager
 type secretService interface {
-	GetSecretValue(input *secretsmanager.GetSecretValueInput) (*secretsmanager.GetSecretValueOutput, error)
+	GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 }
 
 // snsMessage encapsulates the message we get from SNS
@@ -43,7 +45,7 @@ type snsMessage struct {
 
 // s3Service helps with mocking access to S3
 type s3Service interface {
-	GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
 var params *runtimeParameters
@@ -68,29 +70,30 @@ func init() {
 	}
 }
 
-// makeWasabiSession sets up a session to use with Wasabi.
-func makeWasabiSession(region string, wasabiKey string, wasabiSecret string) (*session.Session, error) {
-	config := &aws.Config{
-		Credentials:      credentials.NewStaticCredentials(wasabiKey, wasabiSecret, ""),
-		Endpoint:         aws.String(fmt.Sprintf("https://s3.%s.wasabisys.com", region)),
-		Region:           aws.String(region),
-		S3ForcePathStyle: aws.Bool(true),
+// makeWasabiClient sets up a client to use with Wasabi.
+func makeWasabiClient(ctx context.Context, region string, wasabiKey string, wasabiSecret string) (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(wasabiKey, wasabiSecret, "")),
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	return session.NewSession(config)
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(fmt.Sprintf("https://s3.%s.wasabisys.com", region))
+		o.UsePathStyle = true
+	}), nil
 }
 
-// makeAWSSession sets up an AWS session that can be used to connect to S3.
-func makeAWSSession(region string) (*session.Session, error) {
-	return session.NewSession(
-		&aws.Config{
-			Region: aws.String(region),
-		})
+// makeAWSConfig sets up an AWS configuration.
+func makeAWSConfig(ctx context.Context, region string) (aws.Config, error) {
+	return config.LoadDefaultConfig(ctx, config.WithRegion(region))
 }
 
 // getWasabiSecret tries to fetch the key/secret pair for Wasabi access from SecretsManager.
-func getWasabiSecret(client secretService) (key string, secret string, err error) {
-	result, err := client.GetSecretValue(&secretsmanager.GetSecretValueInput{SecretId: aws.String(WasabiSecret)})
+func getWasabiSecret(ctx context.Context, client secretService) (key string, secret string, err error) {
+	result, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(WasabiSecret)})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read the wasabi secret  %v", err)
 	}
@@ -128,8 +131,8 @@ func validatePrefix(photoPrefix string) string {
 
 // getImageReader tries to get an io.Reader exposing the body of an image given the bucket and key. It will fail
 // if the provided object is not a supported file type. It returns the reader along with the content type
-func getImageReader(service s3Service, bucket string, key string) (io.Reader, string, error) {
-	result, err := service.GetObject(&s3.GetObjectInput{
+func getImageReader(ctx context.Context, service s3Service, bucket string, key string) (io.Reader, string, error) {
+	result, err := service.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
@@ -137,16 +140,17 @@ func getImageReader(service s3Service, bucket string, key string) (io.Reader, st
 		return nil, "", fmt.Errorf("error fetching from s3: %v", err)
 	}
 
+	contentType := aws.ToString(result.ContentType)
 	if strings.HasSuffix(strings.ToLower(key), ".cr3") ||
 		strings.HasSuffix(strings.ToLower(key), ".heic") ||
-		*result.ContentType == HEIC ||
-		*result.ContentType == JPEG {
-		return result.Body, *result.ContentType, nil
+		contentType == HEIC ||
+		contentType == JPEG {
+		return result.Body, contentType, nil
 	}
 
 	return nil, "", fmt.Errorf("only JPEG, CR3 and HEIC supported, fetched file %s was reported as %s",
 		key,
-		*result.ContentType)
+		contentType)
 }
 
 // getImage retrieves the byte contents of a specified reader
@@ -160,12 +164,12 @@ func getImage(r io.Reader) (*[]byte, error) {
 
 // saveToWasabi uses the current configuration to write the supplied image bytes to the target key
 // TODO: this needs a test
-func saveToWasabi(params *runtimeParameters, image *[]byte, key string, contentType string) error {
+func saveToWasabi(ctx context.Context, params *runtimeParameters, image *[]byte, key string, contentType string) error {
 	if params.WasabiService == nil {
 		return fmt.Errorf("no service has been provided to write to wasabi")
 	}
 
-	result, err := params.WasabiService.PutObject(&s3.PutObjectInput{
+	result, err := params.WasabiService.PutObject(ctx, &s3.PutObjectInput{
 		Body:        bytes.NewReader(*image),
 		Bucket:      aws.String(params.WasabiBucket),
 		ContentType: aws.String(contentType),
@@ -174,7 +178,7 @@ func saveToWasabi(params *runtimeParameters, image *[]byte, key string, contentT
 	if err != nil {
 		return fmt.Errorf("writing to wasabi failed: %v", err)
 	}
-	log.Printf("copied to wasabi %q with etag %q", key, *result.ETag)
+	log.Printf("copied to wasabi %q with etag %s", key, aws.ToString(result.ETag))
 
 	return nil
 }
@@ -192,7 +196,7 @@ func parseMessage(messageBody string) (*snsMessage, error) {
 
 // HandleLambdaEvent takes care of processing the incoming S3 event. Only "ObjectCreated:*" events are processed, and only
 // for where the object key starts with the nominated prefix. The count of processed objects is returned
-func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
+func HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (int, error) {
 	cnt := 0
 	// each SNS event probably only has a single record in it, but you never know
 	for _, record := range snsEvent.Records {
@@ -219,7 +223,7 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 				}
 
 				// fetch the object and hand back an io.reader
-				imgReader, contentType, err := getImageReader(params.S3service, event.S3.Bucket.Name, decodedKey)
+				imgReader, contentType, err := getImageReader(ctx, params.S3service, event.S3.Bucket.Name, decodedKey)
 				if err != nil {
 					log.Printf("[%s] Failed to get a reader to read from %s/%s: %v", buildStamp, event.S3.Bucket.Name, decodedKey, err)
 					continue
@@ -232,7 +236,7 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 					continue
 				}
 
-				if err = saveToWasabi(params, imageBytes, decodedKey, contentType); err != nil {
+				if err = saveToWasabi(ctx, params, imageBytes, decodedKey, contentType); err != nil {
 					log.Printf("[%s] failed to copy to wasabi: %v", buildStamp, err)
 					continue
 				}
@@ -248,25 +252,26 @@ func HandleLambdaEvent(snsEvent events.SNSEvent) (int, error) {
 
 // main function invoked when the lambda is launched
 func main() {
-	// create a service to read from S3
-	sess, err := makeAWSSession(params.Region)
+	ctx := context.TODO()
+
+	// create a config to read from S3
+	cfg, err := makeAWSConfig(ctx, params.Region)
 	if err != nil {
-		log.Fatal("Error starting AWS session", err)
+		log.Fatal("Error loading AWS config", err)
 	}
-	params.S3service = s3.New(sess)
+	params.S3service = s3.NewFromConfig(cfg)
 
 	// get the wasabi secrets from SecretsManager
-	params.WasabiKey, params.WasabiSecret, err = getWasabiSecret(secretsmanager.New(sess))
+	params.WasabiKey, params.WasabiSecret, err = getWasabiSecret(ctx, secretsmanager.NewFromConfig(cfg))
 	if err != nil {
 		log.Fatal("Error fetching Wasabi key", err)
 	}
 
 	// and use the secrets to set up a service to write to Wasabi
-	sess, err = makeWasabiSession(params.WasabiRegion, params.WasabiKey, params.WasabiSecret)
+	params.WasabiService, err = makeWasabiClient(ctx, params.WasabiRegion, params.WasabiKey, params.WasabiSecret)
 	if err != nil {
-		log.Fatal("Error starting Wasabi session", err)
+		log.Fatal("Error starting Wasabi service", err)
 	}
-	params.WasabiService = s3.New(sess)
 
 	log.Printf("[%s] Registering handler for photo-wasabi...", buildStamp)
 	lambda.Start(HandleLambdaEvent)
