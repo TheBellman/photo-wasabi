@@ -1,0 +1,29 @@
+name: CI - Test and Verify
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run Tests
+        env:
+          CGO_ENABLED: 0
+        run: go test -v ./...
+
+      - name: Verify Build
+        env:
+          GOARCH: arm64
+          GOOS: linux
+          CGO_ENABLED: 0
+        run:  go build -o bootstrap ./cmd/photo-wasabi
