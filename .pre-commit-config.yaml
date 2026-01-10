@@ -1,0 +1,7 @@
+repos:
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1 # Use the latest version
+    hooks:
+      - id: go-mod-tidy
+      - id: go-fmt        # Formats the code
+      - id: go-imports    # Organizes imports (even better than go-fmt)
