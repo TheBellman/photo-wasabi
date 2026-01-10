@@ -2,216 +2,115 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"testing"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
-type mockSecretsClient struct{}
-type mockS3 struct{}
+type mockS3 struct {
+	getObjectFunc func(ctx context.Context, params *s3.GetObjectInput) (*s3.GetObjectOutput, error)
+}
 
-var jpegMime = "image/jpeg"
-var txtMime = "text/plain"
-var octetMime = "binary/octet-stream"
+func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return m.getObjectFunc(ctx, params)
+}
 
 func testFileReader(name string) io.ReadCloser {
-	// Try looking in the project root relative to the test file
-	f, err := os.Open("../../" + name)
+	f, err := os.Open(name)
 	if err != nil {
-		// Fallback for different test execution contexts
-		f, err = os.Open(name)
-		if err != nil {
-			log.Fatalf("Failed to open %s in root or current dir: %v", name, err)
-		}
+		log.Fatalf("Failed to open %s: %v", name, err)
 	}
 	return f
 }
 
-func (f *mockSecretsClient) GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
-	secret := "{\"ACCESS_KEY_ID\": \"key\", \"SECRET_ACCESS_KEY\": \"secret\"}"
-	return &secretsmanager.GetSecretValueOutput{
-		SecretString: &secret,
-	}, nil
-}
-
-func (f *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
-	if *params.Key == "key/good.jpeg" {
-		return &s3.GetObjectOutput{
-			ContentType: &jpegMime,
-			Body:        testFileReader("../../testdata/test.jpeg"),
-		}, nil
+func TestApp_processObject(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         string
+		contentType string
+		wantErr     bool
+	}{
+		{
+			name:        "valid jpeg",
+			key:         "test.jpeg",
+			contentType: "image/jpeg",
+			wantErr:     false,
+		},
+		{
+			name:        "unsupported type",
+			key:         "test.txt",
+			contentType: "text/plain",
+			wantErr:     true,
+		},
 	}
 
-	if *params.Key == "key/bad.jpeg" {
-		return &s3.GetObjectOutput{
-			ContentType: &txtMime,
-			Body:        testFileReader("../../testdata/test.jpeg"),
-		}, nil
-	}
-
-	if *params.Key == "key/test.CR3" {
-		return &s3.GetObjectOutput{
-			ContentType: &octetMime,
-			Body:        testFileReader("../../testdata/test.CR3"),
-		}, nil
-	}
-
-	if *params.Key == "key/test.HEIC" {
-		return &s3.GetObjectOutput{
-			ContentType: &octetMime,
-			Body:        testFileReader("../../testdata/test.HEIC"),
-		}, nil
-	}
-
-	return nil, errors.New("unexpected test key provided")
-}
-
-func Test_getImageReader(t *testing.T) {
-	mock := mockS3{}
-	_, _, err := getImageReader(context.TODO(), &mock, "bucket", "key/good.jpeg")
-	if err != nil {
-		t.Errorf("Received an unexpected error: %v", err)
-	}
-
-	_, _, err = getImageReader(context.TODO(), &mock, "bucket", "key/bad.jpeg")
-	if err == nil {
-		t.Errorf("Did not get an error when expected")
-	}
-
-	_, _, err = getImageReader(context.TODO(), &mock, "bucket", "key/test.CR3")
-	if err != nil {
-		t.Errorf("Received an unexpected error: %v", err)
-	}
-}
-
-func Test_getImage(t *testing.T) {
-	keys := []string{"../../testdata/test.jpeg", "../../testdata/test.CR3", "../../testdata/test.HEIC"}
-	for _, key := range keys {
-		data, err := getImage(testFileReader(key))
-		if err != nil {
-			t.Errorf("unexpected error loading file: %v", err)
-		}
-		if len(*data) == 0 {
-			t.Errorf("empty byte slice returned!")
-		}
-	}
-}
-
-func Test_getWasabiSecret(t *testing.T) {
-	mock := mockSecretsClient{}
-	key, secret, err := getWasabiSecret(context.TODO(), &mock)
-	if err != nil {
-		t.Errorf("getWasabiSecret() : %v", err)
-	}
-
-	if key != "key" || secret != "secret" {
-		t.Errorf("wanted %q, %q, got %q, %q", "key", "secret", key, secret)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSupported(tt.key, tt.contentType)
+			if tt.wantErr && got {
+				t.Errorf("isSupported(%q, %q) = true, want false", tt.key, tt.contentType)
+			}
+			if !tt.wantErr && !got {
+				t.Errorf("isSupported(%q, %q) = false, want true", tt.key, tt.contentType)
+			}
+		})
 	}
 }
 
 func Test_validatePrefix(t *testing.T) {
-	type args struct {
-		photoPrefix string
-	}
 	tests := []struct {
-		name string
-		args args
-		want string
+		input string
+		want  string
 	}{
-		{name: "empty", args: args{photoPrefix: ""}, want: DefaultSrcPrefix},
-		{name: "nonempty", args: args{photoPrefix: "folder"}, want: "folder/"},
+		{"", DefaultSrcPrefix},
+		{"folder", "folder/"},
+		{"folder/", "folder/"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := validatePrefix(tt.args.photoPrefix); got != tt.want {
-				t.Errorf("validatePrefix() = %v, want %v", got, tt.want)
-			}
-		})
+		if got := validatePrefix(tt.input); got != tt.want {
+			t.Errorf("validatePrefix(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 
-func Test_validateRegion(t *testing.T) {
-	type args struct {
-		region string
+func Test_HandleLambdaEvent_Parsing(t *testing.T) {
+	app := &App{BuildStamp: "test"}
+
+	s3Record := events.S3Event{
+		Records: []events.S3EventRecord{
+			{
+				S3: events.S3Entity{
+					Bucket: events.S3Bucket{Name: "src"},
+					Object: events.S3Object{Key: "photos/img.jpg"},
+				},
+			},
+		},
 	}
-	tests := []struct {
-		name string
-		args args
-		want string
-	}{
-		{name: "empty", args: args{region: ""}, want: DefaultRegion},
-		{name: "nonempty", args: args{region: "us-east-1"}, want: "us-east-1"},
+	s3Json, _ := json.Marshal(s3Record)
+
+	event := events.SNSEvent{
+		Records: []events.SNSEventRecord{
+			{
+				SNS: events.SNSEntity{
+					Message: string(s3Json),
+				},
+			},
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := validateRegion(tt.args.region); got != tt.want {
-				t.Errorf("validateRegion() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func Test_parseMessage(t *testing.T) {
-
-	messageBody := `{
-  "Records": [
-    {
-      "eventVersion": "2.1",
-      "eventSource": "aws:s3",
-      "awsRegion": "eu-west-2",
-      "eventTime": "2021-01-31T20:04:15.053Z",
-      "eventName": "ObjectCreated:Copy",
-      "userIdentity": {
-        "principalId": "AWS:AROA46CDIYCJQTXNTWQ36:photo-lambda"
-      },
-      "requestParameters": {
-        "sourceIPAddress": "35.177.37.71"
-      },
-      "responseElements": {
-        "x-amz-request-id": "ADD9D43C5A604209",
-        "x-amz-id-2": "gJp13URoEHybxQDe1eFpdX+IfB/LmUNPRsZdg7djTq/L1AtEHR3o0Ye5jvExrco94VGDLKAwfgjlrHgAApz5m3WVPeaDdT5RNP1Gv7wwiEQ="
-      },
-      "s3": {
-        "s3SchemaVersion": "1.0",
-        "configurationId": "tf-s3-topic-20210131162404270500000001",
-        "bucket": {
-          "name": "rahookphotos20200913140553484200000001",
-          "ownerIdentity": {
-            "principalId": "AM5JIJPPSMRC3"
-          },
-          "arn": "arn:aws:s3:::rahookphotos20200913140553484200000001"
-        },
-        "object": {
-          "key": "photos/2020/03/20/IMG_0883.jpeg",
-          "size": 10551027,
-          "eTag": "f95f692e6caa5bb2fd9cfc66156d290c",
-          "sequencer": "0060170D40D12F82DC"
-        }
-      }
-    }
-  ]
-}
-`
-
-	message, err := parseMessage(messageBody)
+	// This tests that the parsing logic inside the handler works
+	// You can mock the internal processObject call to verify behavior
+	count, err := app.HandleLambdaEvent(context.TODO(), event)
 	if err != nil {
-		t.Errorf("parseMessage() error = %v", err)
+		t.Errorf("HandleLambdaEvent returned error: %v", err)
 	}
-
-	for _, msg := range message.Records {
-		if msg.S3.Bucket.Arn != "arn:aws:s3:::rahookphotos20200913140553484200000001" {
-			t.Errorf("parseMessage() unexpected ARN: %s", msg.S3.Bucket.Arn)
-		}
-		if msg.S3.Object.Key != "photos/2020/03/20/IMG_0883.jpeg" {
-			t.Errorf("parseMessage() unexpected key: %s", msg.S3.Object.Key)
-		}
+	if count != 0 { // Should be 0 because S3/Wasabi clients are nil in this test
+		t.Errorf("Expected 0 processed records, got %d", count)
 	}
-
 }

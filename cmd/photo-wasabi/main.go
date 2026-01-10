@@ -20,259 +20,180 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
-// runtimeParameters contains various bits needed during execution
-type runtimeParameters struct {
-	WasabiKey     string
-	WasabiSecret  string
-	WasabiRegion  string
-	WasabiBucket  string
-	Region        string
-	SourceBucket  string
-	SourcePrefix  string
-	S3service     *s3.Client
-	WasabiService *s3.Client
-}
-
-// secretService helps with mocking access to SecretsManager
-type secretService interface {
-	GetSecretValue(ctx context.Context, params *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
-}
-
-// snsMessage encapsulates the message we get from SNS
-type snsMessage struct {
-	Records []events.S3EventRecord `json:"Records"`
-}
-
-// s3Service helps with mocking access to S3
-type s3Service interface {
-	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-}
-
-var params *runtimeParameters
-var buildStamp string
-
 const (
 	DefaultSrcPrefix = "photos/"
 	DefaultRegion    = "eu-west-2"
-	WasabiSecret     = "wasabi-access"
-	JPEG             = "image/jpeg"
-	HEIC             = "image/heic"
+	WasabiSecretName = "wasabi-access"
+	MimeJPEG         = "image/jpeg"
+	MimeHEIC         = "image/heic"
 )
 
-func init() {
-	buildStamp = os.Getenv("BUILD_STAMP")
-
-	params = &runtimeParameters{
-		SourcePrefix: validatePrefix(os.Getenv("SOURCE_PREFIX")),
-		Region:       validateRegion(os.Getenv("AWS_REGION")),
-		WasabiBucket: os.Getenv("WASABI_BUCKET"),
-		WasabiRegion: os.Getenv("WASABI_REGION"),
-	}
+// App holds our dependencies and configuration
+type App struct {
+	Config     RuntimeConfig
+	S3         *s3.Client
+	Wasabi     *s3.Client
+	BuildStamp string
 }
 
-// makeWasabiClient sets up a client to use with Wasabi.
-func makeWasabiClient(ctx context.Context, region string, wasabiKey string, wasabiSecret string) (*s3.Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(wasabiKey, wasabiSecret, "")),
+type RuntimeConfig struct {
+	WasabiBucket string
+	WasabiRegion string
+	SourcePrefix string
+	Region       string
+}
+
+// NewApp initializes the application dependencies
+func NewApp(ctx context.Context) (*App, error) {
+	region := getEnv("AWS_REGION", DefaultRegion)
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("unable to load SDK config: %w", err)
+	}
+
+	app := &App{
+		BuildStamp: os.Getenv("BUILD_STAMP"),
+		Config: RuntimeConfig{
+			Region:       region,
+			SourcePrefix: validatePrefix(os.Getenv("SOURCE_PREFIX")),
+			WasabiBucket: os.Getenv("WASABI_BUCKET"),
+			WasabiRegion: os.Getenv("WASABI_REGION"),
+		},
+		S3: s3.NewFromConfig(cfg),
+	}
+
+	// Setup Wasabi
+	smClient := secretsmanager.NewFromConfig(cfg)
+	key, secret, err := app.getWasabiSecret(ctx, smClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wasabi credentials: %w", err)
+	}
+
+	wasabiCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(app.Config.WasabiRegion),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(key, secret, "")),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(fmt.Sprintf("https://s3.%s.wasabisys.com", region))
+	app.Wasabi = s3.NewFromConfig(wasabiCfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(fmt.Sprintf("https://s3.%s.wasabisys.com", app.Config.WasabiRegion))
 		o.UsePathStyle = true
-	}), nil
+	})
+
+	return app, nil
 }
 
-// makeAWSConfig sets up an AWS configuration.
-func makeAWSConfig(ctx context.Context, region string) (aws.Config, error) {
-	return config.LoadDefaultConfig(ctx, config.WithRegion(region))
-}
+func (a *App) HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (int, error) {
+	processedCount := 0
+	for _, record := range snsEvent.Records {
+		var s3Event events.S3Event
+		if err := json.Unmarshal([]byte(record.SNS.Message), &s3Event); err != nil {
+			log.Printf("[%s] failed to parse SNS message: %v", a.BuildStamp, err)
+			continue
+		}
 
-// getWasabiSecret tries to fetch the key/secret pair for Wasabi access from SecretsManager.
-func getWasabiSecret(ctx context.Context, client secretService) (key string, secret string, err error) {
-	result, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(WasabiSecret)})
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read the wasabi secret  %v", err)
-	}
+		for _, event := range s3Event.Records {
+			if !a.shouldProcess(event) {
+				continue
+			}
 
-	var values map[string]string
-	err = json.Unmarshal([]byte(*result.SecretString), &values)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read the secret JSON %v", err)
-	}
-
-	return values["ACCESS_KEY_ID"], values["SECRET_ACCESS_KEY"], nil
-}
-
-// validateRegion will provide the default region if no region is set
-func validateRegion(region string) string {
-	if region == "" {
-		return DefaultRegion
-	} else {
-		return region
-	}
-}
-
-// validatePrefix coerces the environmental variable into a usable prefix, by adding a "/" if necessary or setting it to
-// the default prefix. It returns the coerced prefix
-func validatePrefix(photoPrefix string) string {
-	if !strings.HasSuffix(photoPrefix, "/") {
-		if photoPrefix == "" {
-			photoPrefix = DefaultSrcPrefix
-		} else {
-			photoPrefix += "/"
+			key, _ := url.QueryUnescape(event.S3.Object.Key)
+			if err := a.processObject(ctx, event.S3.Bucket.Name, key); err != nil {
+				log.Printf("[%s] error processing %s: %v", a.BuildStamp, key, err)
+				continue
+			}
+			processedCount++
 		}
 	}
-	return photoPrefix
+	return processedCount, nil
 }
 
-// getImageReader tries to get an io.Reader exposing the body of an image given the bucket and key. It will fail
-// if the provided object is not a supported file type. It returns the reader along with the content type
-func getImageReader(ctx context.Context, service s3Service, bucket string, key string) (io.Reader, string, error) {
-	result, err := service.GetObject(ctx, &s3.GetObjectInput{
+func (a *App) shouldProcess(event events.S3EventRecord) bool {
+	return strings.HasPrefix(event.S3.Object.Key, a.Config.SourcePrefix) &&
+		strings.HasPrefix(event.EventName, "ObjectCreated:")
+}
+
+func (a *App) processObject(ctx context.Context, bucket, key string) error {
+	output, err := a.S3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("error fetching from s3: %v", err)
+		return err
+	}
+	defer output.Body.Close()
+
+	contentType := aws.ToString(output.ContentType)
+	if !isSupported(key, contentType) {
+		return fmt.Errorf("unsupported file type: %s (%s)", key, contentType)
 	}
 
-	contentType := aws.ToString(result.ContentType)
-	if strings.HasSuffix(strings.ToLower(key), ".cr3") ||
-		strings.HasSuffix(strings.ToLower(key), ".heic") ||
-		contentType == HEIC ||
-		contentType == JPEG {
-		return result.Body, contentType, nil
-	}
-
-	return nil, "", fmt.Errorf("only JPEG, CR3 and HEIC supported, fetched file %s was reported as %s",
-		key,
-		contentType)
-}
-
-// getImage retrieves the byte contents of a specified reader
-func getImage(r io.Reader) (*[]byte, error) {
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(output.Body)
 	if err != nil {
-		return &[]byte{}, err
+		return err
 	}
-	return &data, nil
+
+	_, err = a.Wasabi.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(a.Config.WasabiBucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(data),
+		ContentType: aws.String(contentType),
+	})
+	return err
 }
 
-// saveToWasabi uses the current configuration to write the supplied image bytes to the target key
-// TODO: this needs a test
-func saveToWasabi(ctx context.Context, params *runtimeParameters, image *[]byte, key string, contentType string) error {
-	if params.WasabiService == nil {
-		return fmt.Errorf("no service has been provided to write to wasabi")
-	}
-
-	result, err := params.WasabiService.PutObject(ctx, &s3.PutObjectInput{
-		Body:        bytes.NewReader(*image),
-		Bucket:      aws.String(params.WasabiBucket),
-		ContentType: aws.String(contentType),
-		Key:         aws.String(key),
+func (a *App) getWasabiSecret(ctx context.Context, client *secretsmanager.Client) (string, string, error) {
+	out, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(WasabiSecretName),
 	})
 	if err != nil {
-		return fmt.Errorf("writing to wasabi failed: %v", err)
-	}
-	log.Printf("copied to wasabi %q with etag %s", key, aws.ToString(result.ETag))
-
-	return nil
-}
-
-// parseMessage tries to forge the JSON message body from SNS
-func parseMessage(messageBody string) (*snsMessage, error) {
-	var message snsMessage
-
-	err := json.Unmarshal([]byte(messageBody), &message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse the message body: %q = %v", messageBody, err)
-	}
-	return &message, nil
-}
-
-// HandleLambdaEvent takes care of processing the incoming S3 event. Only "ObjectCreated:*" events are processed, and only
-// for where the object key starts with the nominated prefix. The count of processed objects is returned
-func HandleLambdaEvent(ctx context.Context, snsEvent events.SNSEvent) (int, error) {
-	cnt := 0
-	// each SNS event probably only has a single record in it, but you never know
-	for _, record := range snsEvent.Records {
-		message, err := parseMessage(record.SNS.Message)
-		if err != nil {
-			log.Printf("[%s] failed to parse the SNS message at all: %v", buildStamp, err)
-			continue
-		}
-
-		for _, event := range message.Records {
-			log.Printf("[%s] Received request for : object %s/%s", buildStamp, event.S3.Bucket.Name, event.S3.Object.Key)
-			// only process events where the object key as the expected prefix and the event is an object creation
-			if strings.HasPrefix(event.S3.Object.Key, params.SourcePrefix) && strings.HasPrefix(event.EventName, "ObjectCreated:") {
-				decodedKey, err := url.QueryUnescape(event.S3.Object.Key)
-				if err != nil {
-					log.Printf("[%s] Failed to decode the key: '%s'", buildStamp, event.S3.Object.Key)
-					continue
-				}
-
-				// this should be a cannot-happen case
-				if event.AWSRegion != params.Region {
-					log.Printf("[%s] Event is not from the same region as the lambda: got %q, wanted %q", buildStamp, event.AWSRegion, params.Region)
-					continue
-				}
-
-				// fetch the object and hand back an io.reader
-				imgReader, contentType, err := getImageReader(ctx, params.S3service, event.S3.Bucket.Name, decodedKey)
-				if err != nil {
-					log.Printf("[%s] Failed to get a reader to read from %s/%s: %v", buildStamp, event.S3.Bucket.Name, decodedKey, err)
-					continue
-				}
-
-				// extract the image data
-				imageBytes, err := getImage(imgReader)
-				if err != nil {
-					log.Printf("[%s] Failed to read image bytes: %v", buildStamp, err)
-					continue
-				}
-
-				if err = saveToWasabi(ctx, params, imageBytes, decodedKey, contentType); err != nil {
-					log.Printf("[%s] failed to copy to wasabi: %v", buildStamp, err)
-					continue
-				}
-
-				log.Printf("[%s] Processed request for : object %s/%s", buildStamp, event.S3.Bucket.Name, decodedKey)
-				cnt++
-			}
-		}
+		return "", "", err
 	}
 
-	return cnt, nil
+	var creds struct {
+		AccessKey string `json:"ACCESS_KEY_ID"`
+		SecretKey string `json:"SECRET_ACCESS_KEY"`
+	}
+	if err := json.Unmarshal([]byte(*out.SecretString), &creds); err != nil {
+		return "", "", err
+	}
+	return creds.AccessKey, creds.SecretKey, nil
 }
 
-// main function invoked when the lambda is launched
+func isSupported(key, contentType string) bool {
+	lowerKey := strings.ToLower(key)
+	return strings.HasSuffix(lowerKey, ".cr3") ||
+		strings.HasSuffix(lowerKey, ".heic") ||
+		contentType == MimeHEIC ||
+		contentType == MimeJPEG
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func validatePrefix(p string) string {
+	if p == "" {
+		return DefaultSrcPrefix
+	}
+	if !strings.HasSuffix(p, "/") {
+		return p + "/"
+	}
+	return p
+}
+
 func main() {
-	ctx := context.TODO()
-
-	// create a config to read from S3
-	cfg, err := makeAWSConfig(ctx, params.Region)
+	ctx := context.Background()
+	app, err := NewApp(ctx)
 	if err != nil {
-		log.Fatal("Error loading AWS config", err)
-	}
-	params.S3service = s3.NewFromConfig(cfg)
-
-	// get the wasabi secrets from SecretsManager
-	params.WasabiKey, params.WasabiSecret, err = getWasabiSecret(ctx, secretsmanager.NewFromConfig(cfg))
-	if err != nil {
-		log.Fatal("Error fetching Wasabi key", err)
+		log.Fatalf("Initialization failed: %v", err)
 	}
 
-	// and use the secrets to set up a service to write to Wasabi
-	params.WasabiService, err = makeWasabiClient(ctx, params.WasabiRegion, params.WasabiKey, params.WasabiSecret)
-	if err != nil {
-		log.Fatal("Error starting Wasabi service", err)
-	}
-
-	log.Printf("[%s] Registering handler for photo-wasabi...", buildStamp)
-	lambda.Start(HandleLambdaEvent)
+	log.Printf("[%s] Starting photo-wasabi handler...", app.BuildStamp)
+	lambda.Start(app.HandleLambdaEvent)
 }
