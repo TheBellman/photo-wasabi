@@ -120,6 +120,7 @@ func (a *App) shouldProcess(event events.S3EventRecord) bool {
 }
 
 func (a *App) processObject(ctx context.Context, bucket, key string) error {
+	// If the Lambda context is cancelled (timeout), GetObject will return ctx.Err()
 	output, err := a.S3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -135,6 +136,7 @@ func (a *App) processObject(ctx context.Context, bucket, key string) error {
 	}
 
 	// Stream the data directly to Wasabi instead of ReadAll
+	// The SDK will monitor the ctx and abort the PUT if the timeout is reached
 	_, err = a.Wasabi.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(a.Config.WasabiBucket),
 		Key:         aws.String(key),
