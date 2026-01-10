@@ -18,6 +18,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
+// Global variable to persist clients between warm starts
+var app *App
+
 const (
 	DefaultSrcPrefix = "photos/"
 	DefaultRegion    = "eu-west-2"
@@ -206,7 +209,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	ctx := context.Background()
-	app, err := NewApp(ctx)
+	var err error
+	app, err = NewApp(ctx)
 	if err != nil {
 		slog.Error("Initialization failed", "error", err)
 		os.Exit(1)
