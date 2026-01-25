@@ -22,8 +22,8 @@ jobs:
           GOOS: linux
           CGO_ENABLED: 0
         run: |
-          go build -o bootstrap ./cmd/photo-lambda
-          zip photo-lambda-${{ github.event.release.tag_name }}.zip bootstrap
+          go build -o bootstrap ./cmd/photo-wasabi
+          zip photo-wasabi-${{ github.event.release.tag_name }}.zip bootstrap
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -33,4 +33,4 @@ jobs:
           aws-region: eu-west-2
 
       - name: Upload ZIP to S3
-        run: aws s3 cp photo-lambda-${{ github.event.release.tag_name }}.zip s3://${{ vars.BUCKET }}/photo-lambda/photo-lambda-${{ github.event.release.tag_name }}.zip
+        run: aws s3 cp photo-wasabi-${{ github.event.release.tag_name }}.zip s3://${{ vars.BUCKET }}/photo-wasabi/photo-wasabi-${{ github.event.release.tag_name }}.zip
