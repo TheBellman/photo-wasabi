@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log"
-	"os"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -20,43 +17,55 @@ func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFn
 	return m.getObjectFunc(ctx, params)
 }
 
-func testFileReader(name string) io.ReadCloser {
-	f, err := os.Open(name)
-	if err != nil {
-		log.Fatalf("Failed to open %s: %v", name, err)
-	}
-	return f
-}
-
-func TestApp_processObject(t *testing.T) {
+func Test_isSupported(t *testing.T) {
 	tests := []struct {
 		name        string
 		key         string
 		contentType string
-		wantErr     bool
+		want        bool
 	}{
 		{
-			name:        "valid jpeg",
+			name:        "valid jpeg mime type",
 			key:         "test.jpeg",
-			contentType: "image/jpeg",
-			wantErr:     false,
+			contentType: MimeJPEG,
+			want:        true,
+		},
+		{
+			name:        "valid heic mime type",
+			key:         "test",
+			contentType: MimeHEIC,
+			want:        true,
+		},
+		{
+			name:        "valid cr3 extension",
+			key:         "photos/image.cr3",
+			contentType: "application/octet-stream",
+			want:        true,
+		},
+		{
+			name:        "valid uppercase orf extension",
+			key:         "photos/image.ORF",
+			contentType: "application/octet-stream",
+			want:        true,
+		},
+		{
+			name:        "valid heic extension",
+			key:         "photos/image.heic",
+			contentType: "application/octet-stream",
+			want:        true,
 		},
 		{
 			name:        "unsupported type",
 			key:         "test.txt",
 			contentType: "text/plain",
-			wantErr:     true,
+			want:        false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isSupported(tt.key, tt.contentType)
-			if tt.wantErr && got {
-				t.Errorf("isSupported(%q, %q) = true, want false", tt.key, tt.contentType)
-			}
-			if !tt.wantErr && !got {
-				t.Errorf("isSupported(%q, %q) = false, want true", tt.key, tt.contentType)
+			if got := isSupported(tt.key, tt.contentType); got != tt.want {
+				t.Errorf("isSupported(%q, %q) = %v, want %v", tt.key, tt.contentType, got, tt.want)
 			}
 		})
 	}
