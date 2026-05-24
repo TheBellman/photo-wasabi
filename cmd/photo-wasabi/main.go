@@ -29,6 +29,17 @@ const (
 	MimeHEIC         = "image/heic"
 )
 
+var supportedExtensions = []string{
+	".cr3",
+	".orf",
+	".heic",
+}
+
+var supportedMimeTypes = map[string]struct{}{
+	MimeHEIC: {},
+	MimeJPEG: {},
+}
+
 // App holds our dependencies and configuration
 type App struct {
 	Config     RuntimeConfig
@@ -195,11 +206,18 @@ func (a *App) getWasabiSecret(ctx context.Context, client *secretsmanager.Client
 //
 // It returns true if the filename and content type look ok.
 func isSupported(key, contentType string) bool {
+	if _, ok := supportedMimeTypes[contentType]; ok {
+		return true
+	}
+
 	lowerKey := strings.ToLower(key)
-	return strings.HasSuffix(lowerKey, ".cr3") ||
-		strings.HasSuffix(lowerKey, ".heic") ||
-		contentType == MimeHEIC ||
-		contentType == MimeJPEG
+	for _, ext := range supportedExtensions {
+		if strings.HasSuffix(lowerKey, ext) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // getEnv fetches an environmental variable from the lambda environment. If not found
